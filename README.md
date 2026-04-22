@@ -7,7 +7,13 @@
 The recommended one-liner to download and run the script is:
 
 ```bash
-sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/MrMarsellus/defcon-node-inspector/refs/heads/main/defcon-node-inspector.sh -o /tmp/defcon-node-inspector.sh && chmod +x /tmp/defcon-node-inspector.sh && /tmp/defcon-node-inspector.sh menu'
+sudo bash -c '
+  curl -fsSL https://raw.githubusercontent.com/MrMarsellus/defcon-node-inspector/refs/heads/main/defcon-node-inspector.sh \
+    -o /tmp/defcon-node-inspector.sh &&
+  chmod +x /tmp/defcon-node-inspector.sh &&
+  /tmp/defcon-node-inspector.sh install &&
+  /usr/local/bin/defcon-node-inspector menu
+'
 ```
 
 ## Quick workflow
