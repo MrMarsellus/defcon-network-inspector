@@ -472,9 +472,9 @@ def main():
     ap.add_argument('--state-dir', required=True)
     ap.add_argument('--cli', required=True)
     ap.add_argument('--conf')
+    ap.add_argument('--datadir')
     ap.add_argument('--port')
     ap.add_argument('--deep-scan', default='1')
-    ap.add_argument('--datadir')
     args = ap.parse_args()
 
     state_dir = Path(args.state_dir)
