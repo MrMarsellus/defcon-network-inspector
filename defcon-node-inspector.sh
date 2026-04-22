@@ -79,11 +79,11 @@ source /opt/defcon-node-inspector/env.sh
 mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
 while true; do
   sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
-  --state-dir "${STATE_DIR}" \
-  --cli "${CLI_BIN}" \
-  --conf "${CONF_FILE}" \
-  --port "${DEFCON_PORT}" \
-  --deep-scan "${DEEP_SCAN}" >> "${LOG_DIR}/analyzer.log" 2>&1 || true
+    --state-dir "${STATE_DIR}" \
+    --cli "${CLI_BIN}" \
+    --conf "${CONF_FILE}" \
+    --port "${DEFCON_PORT}" \
+    --deep-scan "${DEEP_SCAN}" >> "${LOG_DIR}/analyzer.log" 2>&1 || true
   sleep "${RUN_INTERVAL}"
 done
 RUNNER
@@ -291,7 +291,8 @@ def assess_node(row, by_owner, by_operator, by_ip, history):
             problems.append(f'Owner address has {banned} of {total} nodes in POSE_BANNED state.')
             fixes.append('Review all nodes of this owner together: compare external IP, ProTx service address, operator key, and collateral mapping.')
             score += 40
-            if confidence == 'low': confidence = 'medium'
+            if confidence == 'low':
+                confidence = 'medium'
 
     if row.get('source_protx') and not row.get('source_masternodelist'):
         problems.append('Node appears in protx list valid but not cleanly in masternodelist json.')
@@ -303,7 +304,8 @@ def assess_node(row, by_owner, by_operator, by_ip, history):
         problems.append(f"Mismatch between masternodelist service ({row.get('service')}) and protx info service ({reg_service}).")
         fixes.append('Compare the ProTx service address with the running node configuration; if the registration is wrong, use protx update_service if needed.')
         score += 55
-        if confidence == 'low': confidence = 'medium'
+        if confidence == 'low':
+            confidence = 'medium'
 
     reg_owner = row.get('registered_owner_address')
     if reg_owner and row.get('owner_address') and reg_owner != row.get('owner_address'):
@@ -316,7 +318,8 @@ def assess_node(row, by_owner, by_operator, by_ip, history):
         problems.append('Operator key from protx info differs from masternodelist.')
         fixes.append('Check operator/BLS key and ProTx data; when the operator changed, verify the order of ProUpRegTx and ProUpServTx.')
         score += 45
-        if confidence == 'low': confidence = 'medium'
+        if confidence == 'low':
+            confidence = 'medium'
 
     prev_status = hist.get('last_status')
     flips = hist.get('flips', 0)
@@ -326,16 +329,17 @@ def assess_node(row, by_owner, by_operator, by_ip, history):
         problems.append(f'Node shows status flapping with already {flips} status changes in history.')
         fixes.append('Check for instability: network issues, restarts, wrong service IP, or inconsistent masternode configuration.')
         score += 35
-        if confidence == 'low': confidence = 'medium'
+        if confidence == 'low':
+            confidence = 'medium'
 
-    history[node_id] = {'last_status': status, 'flips': flips, 'last_seen': dt.datetime.utcnow().isoformat() + 'Z'}
+    last_seen = dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00', 'Z')
+    history[node_id] = {'last_status': status, 'flips': flips, 'last_seen': last_seen}
     row['problem_score'] = score
     row['confidence'] = confidence
     row['problems'] = problems
     row['recommended_fix'] = fixes
     row['is_problematic'] = bool(problems)
     return row
-
 
 def esc(v):
     return html.escape('' if v is None else str(v))
@@ -483,7 +487,8 @@ def main():
     reports_dir.mkdir(parents=True, exist_ok=True)
     history_path = state_dir / 'history.json'
     history = load_json(history_path, {})
-    timestamp = dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    now = dt.datetime.now(dt.timezone.utc)
+    timestamp = now.strftime('%Y%m%dT%H%M%SZ')
 
     try:
         mn = run_cli(args.cli, 'masternodelist', 'json',
@@ -606,11 +611,11 @@ run_once() {
   source "${APP_DIR}/env.sh"
   mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
   sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
-  --state-dir "${STATE_DIR}" \
-  --cli "${CLI_BIN}" \
-  --conf "${CONF_FILE}" \
-  --port "${DEFCON_PORT}" \
-  --deep-scan "${DEEP_SCAN}" | tee -a "${LOG_DIR}/manual-run.log"
+    --state-dir "${STATE_DIR}" \
+    --cli "${CLI_BIN}" \
+    --conf "${CONF_FILE}" \
+    --port "${DEFCON_PORT}" \
+    --deep-scan "${DEEP_SCAN}" | tee -a "${LOG_DIR}/manual-run.log"
 }
 
 check_requirements() {
