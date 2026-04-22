@@ -19,7 +19,7 @@ DEFAULT_CONF_FILE="/home/defcon/.defcon/defcon.conf"
 DEFAULT_CLI="/usr/local/bin/defcon-cli"
 DEFAULT_DAEMON="/usr/local/bin/defcond"
 DEFAULT_SERVICE="defcond"
-DEFAULT_PORT="8192"
+DEFAULT_PORT="8193"
 DEFAULT_INTERVAL="600"
 DEFAULT_DEEP_SCAN="1"
 
