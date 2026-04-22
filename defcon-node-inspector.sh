@@ -78,7 +78,13 @@ set -euo pipefail
 source /opt/defcon-node-inspector/env.sh
 mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
 while true; do
-  python3 "${APP_DIR}/analyzer.py" --state-dir "${STATE_DIR}" --cli "${CLI_BIN}" --conf "${CONF_FILE}" --port "${DEFCON_PORT}" --deep-scan "${DEEP_SCAN}" >> "${LOG_DIR}/analyzer.log" 2>&1 || true
+  sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
+    --state-dir "${STATE_DIR}" \
+    --cli "${CLI_BIN}" \
+    --conf "${CONF_FILE}" \
+    --datadir "${DATA_DIR}" \
+    --port "${DEFCON_PORT}" \
+    --deep-scan "${DEEP_SCAN}" >> "${LOG_DIR}/analyzer.log" 2>&1 || true
   sleep "${RUN_INTERVAL}"
 done
 RUNNER
@@ -93,10 +99,18 @@ from collections import defaultdict
 from pathlib import Path
 
 
-def run_cli(cli, *args):
-    res = subprocess.run([cli] + list(args), capture_output=True, text=True)
+def run_cli(cli, *args, conf=None, datadir=None, rpcport=None):
+    cmd = [cli]
+    if conf:
+        cmd.append(f'-conf={conf}')
+    if datadir:
+        cmd.append(f'-datadir={datadir}')
+    if rpcport:
+        cmd.append(f'-rpcport={rpcport}')
+    cmd += list(args)
+    res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"RPC error: {' '.join([cli] + list(args))}\n{res.stderr.strip()}")
+        raise RuntimeError(f"RPC error: {' '.join(cmd)}\n{res.stderr.strip()}")
     txt = res.stdout.strip()
     if not txt:
         return None
@@ -204,7 +218,7 @@ def normalize_protx(raw, rows):
     return rows
 
 
-def deep_scan(rows, cli, enabled):
+def deep_scan(rows, cli, enabled, conf=None, datadir=None, rpcport=None):
     if str(enabled) not in ('1', 'true', 'True', 'yes', 'on'):
         return rows
     for row in rows.values():
@@ -212,7 +226,7 @@ def deep_scan(rows, cli, enabled):
         if not protx:
             continue
         try:
-            info = run_cli(cli, 'protx', 'info', protx)
+            info = run_cli(cli, 'protx', 'info', protx, conf=conf, datadir=datadir, rpcport=rpcport)
             row['protx_info'] = info
             if isinstance(info, dict):
                 state = info.get('state', {}) if isinstance(info.get('state'), dict) else {}
@@ -294,13 +308,13 @@ def assess_node(row, by_owner, by_operator, by_ip, history):
 
     reg_owner = row.get('registered_owner_address')
     if reg_owner and row.get('owner_address') and reg_owner != row.get('owner_address'):
-        problems.append('Owner-Adresse aus protx info weicht of masternodelist ab.')
+        problems.append('Owner address from protx info differs from masternodelist.')
         fixes.append('Check owner mapping; compare local view, registration, and any fork-specific field names.')
         score += 30
 
     reg_op = row.get('registered_operator_pubkey')
     if reg_op and row.get('operator_pubkey') and reg_op != row.get('operator_pubkey'):
-        problems.append('Operator-Key aus protx info weicht of masternodelist ab.')
+        problems.append('Operator key from protx info differs from masternodelist.')
         fixes.append('Check operator/BLS key and ProTx data; when the operator changed, verify the order of ProUpRegTx and ProUpServTx.')
         score += 45
         if confidence == 'low': confidence = 'medium'
@@ -365,11 +379,11 @@ def write_text_report(path, summary, problem_nodes, owner_groups, operator_group
 def write_html_report(path, summary, problem_nodes, owner_groups, operator_groups, ip_groups):
     cards = []
     for title, value, cls in [
-        ('Gesamtzahl Nodes', summary['total_nodes'], 'neutral'),
-        ('Problematische Nodes', summary['problem_nodes'], 'warn'),
+        ('Total nodes', summary['total_nodes'], 'neutral'),
+        ('Problematic nodes', summary['problem_nodes'], 'warn'),
         ('POSE_BANNED', summary['pose_banned'], 'bad'),
-        ('Operator-Dubletten', summary['duplicate_operator_groups'], 'warn'),
-        ('IP-Dubletten', summary['duplicate_ip_groups'], 'warn'),
+        ('Duplicate operators', summary['duplicate_operator_groups'], 'warn'),
+        ('Duplicate IPs', summary['duplicate_ip_groups'], 'warn'),
     ]:
         cards.append(f'<div class="card {cls}"><div class="label">{esc(title)}</div><div class="value">{esc(value)}</div></div>')
 
@@ -399,7 +413,7 @@ def write_html_report(path, summary, problem_nodes, owner_groups, operator_group
     ip_html = ''.join(f'<li>{esc(k)} -> {esc(len(v))} Nodes</li>' for k, v in ip_groups.items())
 
     html_doc = f'''<!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -428,12 +442,12 @@ ul {{ margin:8px 0 0 18px; }}
   <div class="grid">{''.join(cards)}</div>
   <div class="section">
     <h2>Problem nodes</h2>
-    {''.join(rows_html) if rows_html else '<div class="panel">None problematischen Nodes gefunden.</div>'}
+    {''.join(rows_html) if rows_html else '<div class="panel">No problematic nodes found.</div>'}
   </div>
   <div class="section smallgrid">
-    <div class="panel"><h2>Verdächtige Owner</h2><ul>{owner_html or '<li>None</li>'}</ul></div>
-    <div class="panel"><h2>Operator-Dubletten</h2><ul>{op_html or '<li>None</li>'}</ul></div>
-    <div class="panel"><h2>Service-IP-Dubletten</h2><ul>{ip_html or '<li>None</li>'}</ul></div>
+    <div class="panel"><h2>Suspicious owners</h2><ul>{owner_html or '<li>None</li>'}</ul></div>
+    <div class="panel"><h2>Duplicate operators</h2><ul>{op_html or '<li>None</li>'}</ul></div>
+    <div class="panel"><h2>Duplicate service IPs</h2><ul>{ip_html or '<li>None</li>'}</ul></div>
   </div>
 </div>
 </body>
@@ -460,6 +474,7 @@ def main():
     ap.add_argument('--conf')
     ap.add_argument('--port')
     ap.add_argument('--deep-scan', default='1')
+    ap.add_argument('--datadir')
     args = ap.parse_args()
 
     state_dir = Path(args.state_dir)
@@ -472,25 +487,34 @@ def main():
     timestamp = dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
 
     try:
-        mn = run_cli(args.cli, 'masternodelist', 'json')
-        protx = run_cli(args.cli, 'protx', 'list', 'valid', '1')
+        mn = run_cli(args.cli, 'masternodelist', 'json',
+                     conf=args.conf, datadir=args.datadir, rpcport=args.port)
+        protx = run_cli(args.cli, 'protx', 'list', 'valid', '1',
+                        conf=args.conf, datadir=args.datadir, rpcport=args.port)
     except Exception as e:
         (reports_dir / 'latest-error.txt').write_text(str(e) + '\n')
         raise
 
     rows = normalize_protx(protx, normalize_masternodelist(mn))
-    rows = deep_scan(rows, args.cli, args.deep_scan)
+    rows = deep_scan(rows, args.cli, args.deep_scan,
+                     conf=args.conf, datadir=args.datadir, rpcport=args.port)
     assessed = list(rows.values())
     by_owner, by_operator, by_ip = build_indexes(assessed)
     assessed = [assess_node(r, by_owner, by_operator, by_ip, history) for r in assessed]
-    assessed.sort(key=lambda x: (not x.get('is_problematic'), -x.get('problem_score', 0), x.get('service') or ''))
+    assessed.sort(key=lambda x: (not x.get('is_problematic'),
+                                 -x.get('problem_score', 0),
+                                 x.get('service') or ''))
     problem_nodes = [r for r in assessed if r.get('is_problematic')]
     pose_banned = [r for r in assessed if (r.get('status') or '').upper() == 'POSE_BANNED']
     owner_groups = []
     for owner, items in by_owner.items():
         banned = sum(1 for x in items if (x.get('status') or '').upper() == 'POSE_BANNED')
         if banned > 0:
-            owner_groups.append({'owner_address': owner, 'total_nodes': len(items), 'pose_banned': banned})
+            owner_groups.append({
+                'owner_address': owner,
+                'total_nodes': len(items),
+                'pose_banned': banned
+            })
     owner_groups.sort(key=lambda x: (-x['pose_banned'], -x['total_nodes']))
     operator_groups = {k: v for k, v in by_operator.items() if len(v) > 1}
     ip_groups = {k: v for k, v in by_ip.items() if len(v) > 1}
@@ -506,16 +530,18 @@ def main():
 
     save_json(snapshots_dir / f'snapshot-{timestamp}.json', assessed)
     save_json(reports_dir / 'latest-summary.json', summary)
-    save_json(reports_dir / 'problem nodes.json', problem_nodes)
+    save_json(reports_dir / 'problem-nodes.json', problem_nodes)
     save_json(reports_dir / 'owner-groups.json', owner_groups)
     save_json(reports_dir / 'duplicate-operators.json', operator_groups)
     save_json(reports_dir / 'duplicate-ips.json', ip_groups)
-    write_csv(reports_dir / 'problem nodes.csv', problem_nodes)
-    write_text_report(reports_dir / 'latest-summary.txt', summary, problem_nodes, owner_groups, operator_groups, ip_groups)
-    write_html_report(reports_dir / 'latest-report.html', summary, problem_nodes, owner_groups, operator_groups, ip_groups)
+    write_csv(reports_dir / 'problem-nodes.csv', problem_nodes)
+    write_text_report(reports_dir / 'latest-summary.txt', summary,
+                      problem_nodes, owner_groups, operator_groups, ip_groups)
+    write_html_report(reports_dir / 'latest-report.html', summary,
+                      problem_nodes, owner_groups, operator_groups, ip_groups)
     save_json(history_path, history)
     print(json.dumps(summary))
-
+    
 if __name__ == '__main__':
     main()
 PYEOF
@@ -551,15 +577,15 @@ show_reports() {
 
 show_problem_nodes_json() {
   source "${APP_DIR}/env.sh"
-  local file="${STATE_DIR}/reports/problem nodes.json"
+  local file="${STATE_DIR}/reports/problem-nodes.json"
   if [[ -f "$file" ]]; then
     python3 - <<PY
 import json
 from pathlib import Path
-p = Path("${STATE_DIR}/reports/problem nodes.json")
+p = Path("${STATE_DIR}/reports/problem-nodes.json")
 rows = json.loads(p.read_text())
 if not rows:
-    print("None problematischen Nodes gefunden.")
+    print("No problematic nodes found.")
 else:
     for i, r in enumerate(rows, 1):
         print(f"[{i}] {(r.get('protx_hash') or r.get('outpoint') or r.get('service'))}")
@@ -580,7 +606,13 @@ PY
 run_once() {
   source "${APP_DIR}/env.sh"
   mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
-  python3 "${APP_DIR}/analyzer.py" --state-dir "${STATE_DIR}" --cli "${CLI_BIN}" --conf "${CONF_FILE}" --port "${DEFCON_PORT}" --deep-scan "${DEEP_SCAN}" | tee -a "${LOG_DIR}/manual-run.log"
+  sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
+    --state-dir "${STATE_DIR}" \
+    --cli "${CLI_BIN}" \
+    --conf "${CONF_FILE}" \
+    --datadir "${DATA_DIR}" \
+    --port "${DEFCON_PORT}" \
+    --deep-scan "${DEEP_SCAN}" | tee -a "${LOG_DIR}/manual-run.log"
 }
 
 check_requirements() {
@@ -590,15 +622,26 @@ check_requirements() {
   [[ -x "${DAEMON_BIN}" ]] && ok "Daemon found: ${DAEMON_BIN}" || err "Daemon not found: ${DAEMON_BIN}"
   [[ -f "${CONF_FILE}" ]] && ok "Config found: ${CONF_FILE}" || err "Config not found: ${CONF_FILE}"
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet "${DEFCON_SERVICE}"; then ok "Service ${DEFCON_SERVICE} is running"; else warn "Service ${DEFCON_SERVICE} is running nicht"; fi
+    if systemctl is-active --quiet "${DEFCON_SERVICE}"; then
+      ok "Service ${DEFCON_SERVICE} is running"
+    else
+      warn "Service ${DEFCON_SERVICE} is not running"
+    fi
   fi
   if [[ -x "${CLI_BIN}" ]]; then
-    set +e; "${CLI_BIN}" getblockcount >/dev/null 2>&1
-    [[ $? -eq 0 ]] && ok "RPC responds to getblockcount" || warn "RPC does not respond to getblockcount"
+    set +e
+    sudo -u "${DEFCON_USER}" "${CLI_BIN}" \
+      -conf="${CONF_FILE}" \
+      -datadir="${DATA_DIR}" \
+      getblockcount >/dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+      ok "RPC responds to getblockcount (as ${DEFCON_USER})"
+    else
+      warn "RPC does not respond to getblockcount with current CLI/conf/datadir"
+    fi
     set -e
   fi
 }
-
 start_background() {
   source "${APP_DIR}/env.sh"
   mkdir -p "${LOG_DIR}" "${STATE_DIR}"
@@ -606,7 +649,7 @@ start_background() {
     systemctl enable --now "${APP_NAME}.service"
     ok "Background analysis started via systemd."
   else
-    if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then warn "Analyse is running bereits mit PID $(cat "${PID_FILE}")"; return; fi
+    if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then warn "Background analysis is already running with PID $(cat "${PID_FILE}")"; return; fi
     nohup "${RUNNER_PATH}" >> "${NOHUP_LOG}" 2>&1 &
     echo $! > "${PID_FILE}"
     ok "Background analysis started via nohup. PID $(cat "${PID_FILE}")"
@@ -630,7 +673,7 @@ status_background() {
   elif [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
     info "Running via nohup with PID $(cat "${PID_FILE}")"
   else
-    warn "None laufende Hintergrund-Analyse gefunden."
+    warn "No running background analysis found."
   fi
 }
 
@@ -673,7 +716,7 @@ menu() {
     echo "4) Stop background analysis"
     echo "5) Show status"
     echo "6) Show latest report"
-    echo "7) Problem nodes anzeigen"
+    echo "7) Show problem nodes"
     echo "8) Show report/log paths"
     echo "9) Delete all stored data"
     echo "0) Exit"
@@ -722,7 +765,7 @@ USAGE
 
 main() {
   cmd="${1:-menu}"
-  if [[ ! -f "${APP_DIR}/env.sh" ]]; then echo "${APP_NAME} wird installiert..."; install_app; fi
+  if [[ ! -f "${APP_DIR}/env.sh" ]]; then echo "${APP_NAME} is being installed..."; install_app; fi
   case "$cmd" in
     install) install_app ;;
     menu) menu ;;
