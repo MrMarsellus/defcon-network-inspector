@@ -1,6 +1,6 @@
 # DeFCoN Network Inspector
 
-`defcon-node-inspector` is a VPS tool for analyzing DeFCoN masternodes over RPC from a network-wide perspective. It checks `masternodelist`, `protx list valid`, and optionally `protx info`, then correlates public node data to identify problematic nodes, suspicious operator-key reuse, shared IP clusters, subnet clusters, and PoSe ban waves.
+`defcon-network-inspector` is a VPS tool for analyzing DeFCoN masternodes over RPC from a network-wide perspective. It checks `masternodelist`, `protx list valid`, and optionally `protx info`, then correlates public node data to identify problematic nodes, suspicious operator-key reuse, shared IP clusters, subnet clusters, and PoSe ban waves.
 
 The goal is not only to inspect your own node, but also to identify publicly visible patterns across the network so affected operators can be contacted in the community.
 
@@ -10,16 +10,16 @@ The recommended one-liner to download and run the script is:
 
 ```bash
 sudo bash -c '
-  curl -fsSL https://raw.githubusercontent.com/MrMarsellus/defcon-node-inspector/refs/heads/main/defcon-node-inspector.sh \
-    -o /tmp/defcon-node-inspector.sh &&
-  chmod +x /tmp/defcon-node-inspector.sh &&
-  /tmp/defcon-node-inspector.sh install &&
-  /usr/local/bin/defcon-node-inspector menu
+  curl -fsSL https://raw.githubusercontent.com/MrMarsellus/defcon-network-inspector/refs/heads/main/defcon-network-inspector.sh \
+    -o /tmp/defcon-network-inspector.sh &&
+  chmod +x /tmp/defcon-network-inspector.sh &&
+  /tmp/defcon-network-inspector.sh install &&
+  /usr/local/bin/defcon-network-inspector menu
 '
 ```
 
 ```bash
-sudo /usr/local/bin/defcon-node-inspector menu
+sudo /usr/local/bin/defcon-network-inspector menu
 ```
 
 ## What it analyzes
@@ -40,7 +40,7 @@ The tool combines public RPC data to detect:
 - Run **Check requirements** first
 - Run **Run one-time analysis** for an immediate snapshot
 - Or use **Start background analysis** to collect historical data
-- Review reports in `/var/lib/defcon-node-inspector/reports/`
+- Review reports in `/var/lib/defcon-network-inspector/reports/`
 
 ## Menu functions
 
@@ -61,7 +61,7 @@ The tool combines public RPC data to detect:
 
 The script writes reports to:
 
-`/var/lib/defcon-node-inspector/reports/`
+`/var/lib/defcon-network-inspector/reports/`
 
 Important files include:
 
@@ -91,8 +91,8 @@ The script uses these defaults:
 - It is designed to identify publicly visible evidence that helps you contact operators of suspicious or affected nodes.
 - Operator-key reuse and clustered PoSe bans are especially important indicators in deterministic masternode setups.
 
-If you prefer not to use the one-liner, you can also copy only the `defcon-node-inspector.sh` file to the VPS and run it directly with:
+If you prefer not to use the one-liner, you can also copy only the `defcon-network-inspector.sh` file to the VPS and run it directly with:
 
 ```bash
-sudo bash defcon-node-inspector.sh
+sudo bash defcon-network-inspector.sh
 ```
