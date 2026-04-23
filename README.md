@@ -52,6 +52,8 @@ The tool combines public RPC data to detect:
 
 ## Menu functions
 
+The menu currently provides these functions:
+
 - Check requirements
 - Run one-time analysis
 - Start background analysis
@@ -71,11 +73,13 @@ The v2 release adds safer background operation and bounded history handling.
 
 - The systemd service runs as the configured `DEFCON_USER`.
 - Historical node data in `history.json` is retained for 30 days by default.
-- `history.json` starts with a `_meta` placeholder section before node entries are added.
+- `history.json` includes a `_meta` section with pruning metadata.
 - RPC calls use a timeout so stuck CLI calls do not hang the analyzer indefinitely.
-- Repeated analyzer failures are no longer ignored forever; the runner exits after multiple consecutive failures so systemd can restart it cleanly.
+- Repeated analyzer failures are counted and the runner exits after multiple consecutive failures so systemd can restart it cleanly.
 - A health state file is written to `/var/lib/defcon-network-inspector/health.json`.
 - If `history.json` becomes corrupt, the tool attempts to preserve it as a timestamped `.corrupt-*` backup before rebuilding a clean history file.
+- The analyzer keeps snapshots and generated reports bounded by retention settings.
+- The background runner rotates `analyzer.log` when it exceeds the configured size limit and deletes old log files by age.
 
 ## Main report outputs
 
@@ -88,6 +92,7 @@ Important files include:
 - `latest-summary.txt`
 - `latest-summary.json`
 - `latest-report.html`
+- `latest-error.txt`
 - `all-nodes.json`
 - `all-nodes.csv`
 - `problem-nodes.json`
@@ -115,6 +120,20 @@ Snapshots are stored in:
 
 `/var/lib/defcon-network-inspector/snapshots/`
 
+## Logs
+
+Runtime logs are stored under:
+
+`/var/log/defcon-network-inspector/`
+
+Important log files can include:
+
+- `analyzer.log` for background analyzer output
+- `manual-run.log` for one-time manual runs
+- `nohup.log` when running without systemd fallback
+
+The runner rotates `analyzer.log` when it reaches the configured size limit and removes older log files based on retention settings.
+
 ## Default paths
 
 The script uses these defaults:
@@ -133,8 +152,12 @@ The script also uses these runtime defaults:
 - Deep scan: `1`
 - PoSe wave window: `1800` seconds
 - History retention: `30` days
+- Snapshot retention: `30` days
+- Report retention: `30` days
+- Log retention: `14` days
 - RPC timeout: `30` seconds
 - Max consecutive analyzer failures: `5`
+- Max analyzer log size before rotation: `25` MB
 
 ## Notes
 
@@ -157,6 +180,20 @@ For systemd-based systems, the background service is installed as:
 
 `/etc/systemd/system/defcon-network-inspector.service`
 
-The environment file is stored at:
+The runtime environment file is stored at:
 
-`/etc/default/defcon-network-inspector`
+`/opt/defcon-network-inspector/env.sh`
+
+The menu symlink is installed at:
+
+`/usr/local/bin/defcon-network-inspector`
+
+## Service hardening
+
+On systemd-based systems, the service uses several hardening-related options in its unit definition, including:
+
+- `NoNewPrivileges=yes`
+- `PrivateTmp=yes`
+- `ProtectSystem=full`
+- `ProtectHome=read-only`
+- `ReadWritePaths=/var/lib/defcon-network-inspector /var/log/defcon-network-inspector`
