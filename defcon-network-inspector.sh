@@ -1651,16 +1651,16 @@ install_app() {
 usage() {
 cat <<USAGE
 Usage:
-  bash defcon-network-inspector-v2.sh                # installs on first run and shows the menu
-  bash defcon-network-inspector-v2.sh menu
-  bash defcon-network-inspector-v2.sh install
-  bash defcon-network-inspector-v2.sh run-once
-  bash defcon-network-inspector-v2.sh start
-  bash defcon-network-inspector-v2.sh stop
-  bash defcon-network-inspector-v2.sh status
-  bash defcon-network-inspector-v2.sh report
-  bash defcon-network-inspector-v2.sh problems
-  bash defcon-network-inspector-v2.sh wipe
+  bash defcon-network-inspector.sh                # installs on first run and shows the menu
+  bash defcon-network-inspector.sh menu
+  bash defcon-network-inspector.sh install
+  bash defcon-network-inspector.sh run-once
+  bash defcon-network-inspector.sh start
+  bash defcon-network-inspector.sh stop
+  bash defcon-network-inspector.sh status
+  bash defcon-network-inspector.sh report
+  bash defcon-network-inspector.sh problems
+  bash defcon-network-inspector.sh wipe
 USAGE
 }
 
