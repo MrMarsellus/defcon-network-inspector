@@ -95,7 +95,17 @@ write_runner() {
 cat > "${RUNNER_PATH}" <<'RUNNER'
 #!/usr/bin/env bash
 set -euo pipefail
-source "${APP_DIR}/env.sh"
+
+APP_NAME="defcon-network-inspector"
+APP_DIR="/opt/${APP_NAME}"
+STATE_DIR="/var/lib/${APP_NAME}"
+LOG_DIR="/var/log/${APP_NAME}"
+
+if [[ -r "${APP_DIR}/env.sh" ]]; then
+  # shellcheck source=/opt/defcon-network-inspector/env.sh
+  source "${APP_DIR}/env.sh"
+fi
+
 mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
 
 FAIL_COUNT=0
