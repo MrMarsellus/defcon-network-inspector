@@ -6,12 +6,14 @@ APP_DIR="/opt/${APP_NAME}"
 STATE_DIR="/var/lib/${APP_NAME}"
 LOG_DIR="/var/log/${APP_NAME}"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
+ENV_FILE="/etc/default/${APP_NAME}"
 RUNNER_PATH="${APP_DIR}/runner.sh"
 ANALYZER_PATH="${APP_DIR}/analyzer.py"
 MENU_LINK="/usr/local/bin/${APP_NAME}"
 PID_FILE="${STATE_DIR}/${APP_NAME}.pid"
 NOHUP_LOG="${LOG_DIR}/nohup.log"
 LOCK_FILE="${STATE_DIR}/run.lock"
+HEALTH_FILE="${STATE_DIR}/health.json"
 
 DEFAULT_DEFCON_USER="defcon"
 DEFAULT_DEFCON_HOME="/home/defcon"
@@ -24,6 +26,9 @@ DEFAULT_RPC_PORT="8193"
 DEFAULT_INTERVAL="600"
 DEFAULT_DEEP_SCAN="1"
 DEFAULT_WAVE_WINDOW_SECONDS="1800"
+DEFAULT_HISTORY_RETENTION_DAYS="30"
+DEFAULT_RPC_TIMEOUT_SECONDS="30"
+DEFAULT_MAX_CONSECUTIVE_FAILURES="5"
 
 DEFCON_USER="${DEFCON_USER:-$DEFAULT_DEFCON_USER}"
 DEFCON_HOME="${DEFCON_HOME:-$DEFAULT_DEFCON_HOME}"
@@ -36,6 +41,9 @@ DEFCON_RPC_PORT="${DEFCON_RPC_PORT:-$DEFAULT_RPC_PORT}"
 RUN_INTERVAL="${RUN_INTERVAL:-$DEFAULT_INTERVAL}"
 DEEP_SCAN="${DEEP_SCAN:-$DEFAULT_DEEP_SCAN}"
 WAVE_WINDOW_SECONDS="${WAVE_WINDOW_SECONDS:-$DEFAULT_WAVE_WINDOW_SECONDS}"
+HISTORY_RETENTION_DAYS="${HISTORY_RETENTION_DAYS:-$DEFAULT_HISTORY_RETENTION_DAYS}"
+RPC_TIMEOUT_SECONDS="${RPC_TIMEOUT_SECONDS:-$DEFAULT_RPC_TIMEOUT_SECONDS}"
+MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-$DEFAULT_MAX_CONSECUTIVE_FAILURES}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 mkdir_p() { mkdir -p "$1"; }
@@ -46,20 +54,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err() { echo -e "${RED}[ERR]${NC} $*"; }
 
 write_env() {
-cat > "${APP_DIR}/env.sh" <<ENV
+cat > "${ENV_FILE}" <<ENV
 APP_NAME="${APP_NAME}"
 APP_DIR="${APP_DIR}"
 STATE_DIR="${STATE_DIR}"
 LOG_DIR="${LOG_DIR}"
 LOCK_FILE="${LOCK_FILE}"
-DEFAULT_DEFCON_USER="${DEFAULT_DEFCON_USER}"
-DEFAULT_DEFCON_HOME="${DEFAULT_DEFCON_HOME}"
-DEFAULT_DATA_DIR="${DEFAULT_DATA_DIR}"
-DEFAULT_CONF_FILE="${DEFAULT_CONF_FILE}"
-DEFAULT_CLI="${DEFAULT_CLI}"
-DEFAULT_DAEMON="${DEFAULT_DAEMON}"
-DEFAULT_SERVICE="${DEFAULT_SERVICE}"
-DEFAULT_RPC_PORT="${DEFAULT_RPC_PORT}"
+PID_FILE="${PID_FILE}"
+NOHUP_LOG="${NOHUP_LOG}"
+HEALTH_FILE="${HEALTH_FILE}"
 DEFCON_USER="${DEFCON_USER}"
 DEFCON_HOME="${DEFCON_HOME}"
 DATA_DIR="${DATA_DIR}"
@@ -71,9 +74,18 @@ DEFCON_RPC_PORT="${DEFCON_RPC_PORT}"
 RUN_INTERVAL="${RUN_INTERVAL}"
 DEEP_SCAN="${DEEP_SCAN}"
 WAVE_WINDOW_SECONDS="${WAVE_WINDOW_SECONDS}"
-PID_FILE="${PID_FILE}"
-NOHUP_LOG="${NOHUP_LOG}"
+HISTORY_RETENTION_DAYS="${HISTORY_RETENTION_DAYS}"
+RPC_TIMEOUT_SECONDS="${RPC_TIMEOUT_SECONDS}"
+MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES}"
 ENV
+chmod 0644 "${ENV_FILE}"
+
+cat > "${APP_DIR}/env.sh" <<ENVSH
+#!/usr/bin/env bash
+set -euo pipefail
+source "${ENV_FILE}"
+ENVSH
+chmod 0755 "${APP_DIR}/env.sh"
 }
 
 write_runner() {
@@ -83,16 +95,29 @@ set -euo pipefail
 source /opt/defcon-network-inspector/env.sh
 mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
 
+consecutive_failures=0
 while true; do
   (
     flock -n 9 || exit 0
-    sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
+    if python3 "${APP_DIR}/analyzer.py" \
       --state-dir "${STATE_DIR}" \
       --cli "${CLI_BIN}" \
       --conf "${CONF_FILE}" \
+      --datadir "${DATA_DIR}" \
       --rpc-port "${DEFCON_RPC_PORT}" \
       --deep-scan "${DEEP_SCAN}" \
-      --wave-window-seconds "${WAVE_WINDOW_SECONDS}" >> "${LOG_DIR}/analyzer.log" 2>&1 || true
+      --wave-window-seconds "${WAVE_WINDOW_SECONDS}" \
+      --history-retention-days "${HISTORY_RETENTION_DAYS}" \
+      --rpc-timeout-seconds "${RPC_TIMEOUT_SECONDS}" >> "${LOG_DIR}/analyzer.log" 2>&1; then
+      consecutive_failures=0
+    else
+      consecutive_failures=$((consecutive_failures + 1))
+      printf '%s\n' "$(date -u +%FT%TZ) analyzer failed (${consecutive_failures}/${MAX_CONSECUTIVE_FAILURES})" >> "${LOG_DIR}/runner.log"
+      if (( consecutive_failures >= MAX_CONSECUTIVE_FAILURES )); then
+        printf '%s\n' "$(date -u +%FT%TZ) exiting runner after repeated analyzer failures" >> "${LOG_DIR}/runner.log"
+        exit 1
+      fi
+    fi
   ) 9>"${LOCK_FILE}"
   sleep "${RUN_INTERVAL}"
 done
@@ -103,9 +128,25 @@ chmod +x "${RUNNER_PATH}"
 write_analyzer() {
 cat > "${ANALYZER_PATH}" <<'PYEOF'
 #!/usr/bin/env python3
-import argparse, csv, datetime as dt, html, ipaddress, json, subprocess
+import argparse
+import csv
+import datetime as dt
+import html
+import ipaddress
+import json
+import subprocess
 from collections import defaultdict
 from pathlib import Path
+
+
+HISTORY_PLACEHOLDER = {
+    "_meta": {
+        "format": "defcon-network-inspector-history-v2",
+        "note": "placeholder initialized before first node entries",
+        "created_at": None,
+        "retention_days": 30,
+    }
+}
 
 
 def utc_now():
@@ -117,7 +158,100 @@ def utc_iso(ts=None):
     return ts.isoformat().replace('+00:00', 'Z')
 
 
-def run_cli(cli, *args, conf=None, datadir=None, rpcport=None):
+def parse_utc(ts):
+    if not ts:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def ensure_history_placeholder(history, retention_days):
+    if not isinstance(history, dict):
+        history = {}
+    meta = history.get('_meta')
+    if not isinstance(meta, dict):
+        meta = {}
+    meta.setdefault('format', 'defcon-network-inspector-history-v2')
+    meta.setdefault('note', 'placeholder initialized before first node entries')
+    meta.setdefault('created_at', utc_iso())
+    meta['retention_days'] = retention_days
+    history['_meta'] = meta
+    return history
+
+
+def prune_history(history, retention_days):
+    history = ensure_history_placeholder(history, retention_days)
+    cutoff = utc_now() - dt.timedelta(days=retention_days)
+    pruned = {'_meta': history.get('_meta', {})}
+
+    for node_id, hist in history.items():
+        if node_id == '_meta' or not isinstance(hist, dict):
+            continue
+
+        def keep_event(item):
+            if not isinstance(item, dict):
+                return False
+            at = parse_utc(item.get('at'))
+            return at is not None and at >= cutoff
+
+        service_history = [x for x in hist.get('service_history', []) if keep_event(x)]
+        registered_service_history = [x for x in hist.get('registered_service_history', []) if keep_event(x)]
+        pose_ban_events = [x for x in hist.get('pose_ban_events', []) if keep_event(x)]
+        events = [x for x in hist.get('events', []) if keep_event(x)]
+
+        first_seen = hist.get('first_seen')
+        first_seen_dt = parse_utc(first_seen)
+        if first_seen_dt is not None and first_seen_dt < cutoff:
+            first_seen = cutoff.isoformat().replace('+00:00', 'Z')
+
+        last_seen = hist.get('last_seen')
+        last_seen_dt = parse_utc(last_seen)
+
+        if not any([service_history, registered_service_history, pose_ban_events, events]) and (last_seen_dt is None or last_seen_dt < cutoff):
+            continue
+
+        pruned[node_id] = {
+            'first_seen': first_seen or utc_iso(),
+            'last_seen': last_seen or utc_iso(),
+            'last_status': hist.get('last_status', ''),
+            'service_history': service_history,
+            'registered_service_history': registered_service_history,
+            'pose_ban_events': pose_ban_events,
+            'events': events,
+        }
+
+    return pruned
+
+
+def load_json(path, default, salvage_corrupt=False):
+    if path.exists():
+        try:
+            return json.loads(path.read_text()), None
+        except Exception as e:
+            backup_path = None
+            if salvage_corrupt:
+                backup_path = path.with_name(path.name + f".corrupt-{utc_now().strftime('%Y%m%dT%H%M%SZ')}")
+                try:
+                    path.rename(backup_path)
+                except Exception:
+                    backup_path = None
+            return default, (str(e), str(backup_path) if backup_path else None)
+    return default, None
+
+
+def save_json(path, data):
+    path.write_text(json.dumps(data, indent=2, sort_keys=False))
+
+
+def write_health(path, status, **extra):
+    payload = {'status': status, 'updated_at': utc_iso()}
+    payload.update(extra)
+    save_json(path, payload)
+
+
+def run_cli(cli, *args, conf=None, datadir=None, rpcport=None, timeout_seconds=30):
     cmd = [cli]
     if conf:
         cmd.append(f'-conf={conf}')
@@ -126,7 +260,10 @@ def run_cli(cli, *args, conf=None, datadir=None, rpcport=None):
     if rpcport:
         cmd.append(f'-rpcport={rpcport}')
     cmd += list(args)
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"RPC timeout after {timeout_seconds}s: {' '.join(cmd)}") from e
     if res.returncode != 0:
         raise RuntimeError(f"RPC error: {' '.join(cmd)}\n{res.stderr.strip()}")
     txt = res.stdout.strip()
@@ -170,19 +307,6 @@ def subnet24(ip):
         return str(ipaddress.ip_network(f"{ip}/64", strict=False))
     except Exception:
         return None
-
-
-def load_json(path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            return default
-    return default
-
-
-def save_json(path, data):
-    path.write_text(json.dumps(data, indent=2, sort_keys=False))
 
 
 def normalize_masternodelist(raw):
@@ -261,7 +385,7 @@ def normalize_protx(raw, rows):
     return rows
 
 
-def deep_scan(rows, cli, enabled, conf=None, datadir=None, rpcport=None):
+def deep_scan(rows, cli, enabled, conf=None, datadir=None, rpcport=None, timeout_seconds=30):
     if str(enabled).lower() not in ('1', 'true', 'yes', 'on'):
         return rows
     for row in rows.values():
@@ -269,7 +393,7 @@ def deep_scan(rows, cli, enabled, conf=None, datadir=None, rpcport=None):
         if not protx:
             continue
         try:
-            info = run_cli(cli, 'protx', 'info', protx, conf=conf, datadir=datadir, rpcport=rpcport)
+            info = run_cli(cli, 'protx', 'info', protx, conf=conf, datadir=datadir, rpcport=rpcport, timeout_seconds=timeout_seconds)
             row['protx_info'] = info
             if isinstance(info, dict):
                 state = info.get('state', {}) if isinstance(info.get('state'), dict) else {}
@@ -459,6 +583,7 @@ def find_pose_ban_waves(rows, history, window_seconds=1800):
             except Exception:
                 continue
             events.append({
+                'event_id': f"{node_id}|{e['at']}",
                 'at': at,
                 'at_iso': e['at'],
                 'node_id': node_id,
@@ -470,12 +595,12 @@ def find_pose_ban_waves(rows, history, window_seconds=1800):
                 'service': row.get('service'),
             })
 
-    events.sort(key=lambda x: x['at'])
+    events.sort(key=lambda x: (x['at'], x['node_id']))
     waves = []
-    used = set()
+    used_event_ids = set()
 
     for i, base in enumerate(events):
-        if i in used:
+        if base['event_id'] in used_event_ids:
             continue
         cluster = [base]
         for j in range(i + 1, len(events)):
@@ -524,8 +649,8 @@ def find_pose_ban_waves(rows, history, window_seconds=1800):
                     'owner_address': x.get('owner_address'),
                 } for x in cluster]
             })
-            for j in range(i, min(i + len(cluster), len(events))):
-                used.add(j)
+            for item in cluster:
+                used_event_ids.add(item['event_id'])
 
     waves.sort(key=lambda x: (-x['total_nodes'], x['started_at']))
     return waves
@@ -706,8 +831,8 @@ def write_text_report(path, summary, problem_nodes, operator_clusters, ip_cluste
         lines.append(f"  Evidence: {row.get('evidence_level')} | Score: {row.get('problem_score')} | Cause: {row.get('suspected_root_cause')}")
         for p in row.get('problems', []):
             lines.append(f"  Problem: {p}")
-        for f in row.get('recommended_fix', []):
-            lines.append(f"  Action: {f}")
+        for fx in row.get('recommended_fix', []):
+            lines.append(f"  Action: {fx}")
         lines.append('')
 
     lines += ['', 'Suspect operator clusters', '--------------------------------']
@@ -750,16 +875,16 @@ def write_html_report(path, summary, problem_nodes, operator_clusters, ip_cluste
         ('Ban waves', summary['pose_ban_waves'], 'bad'),
         ('Contact targets', summary['community_contacts'], 'neutral'),
     ]:
-        cards.append(f'<div class="card {cls}"><div class="label">{esc(title)}</div><div class="value">{esc(value)}</div></div>')
+        cards.append(f'<div class=\"card {cls}\"><div class=\"label\">{esc(title)}</div><div class=\"value\">{esc(value)}</div></div>')
 
     nodes_html = []
     for r in problem_nodes[:120]:
         problems = ''.join(f'<li>{esc(x)}</li>' for x in r.get('problems', []))
         fixes = ''.join(f'<li>{esc(x)}</li>' for x in r.get('recommended_fix', []))
         nodes_html.append(f'''
-        <div class="node">
+        <div class=\"node\">
           <h3>{esc(r.get('protx_hash') or r.get('service'))}</h3>
-          <div class="meta">
+          <div class=\"meta\">
             <span>Status: {esc(r.get('status'))}</span>
             <span>IP: {esc(r.get('service_ip'))}</span>
             <span>Evidence: {esc(r.get('evidence_level'))}</span>
@@ -767,7 +892,7 @@ def write_html_report(path, summary, problem_nodes, operator_clusters, ip_cluste
             <span>Score: {esc(r.get('problem_score'))}</span>
           </div>
           <p><strong>Service:</strong> {esc(r.get('service'))}<br><strong>Operator:</strong> {esc(r.get('operator_pubkey'))}</p>
-          <div class="cols">
+          <div class=\"cols\">
             <div><h4>Why suspicious</h4><ul>{problems or "<li>None</li>"}</ul></div>
             <div><h4>Suggested action</h4><ul>{fixes or "<li>None</li>"}</ul></div>
           </div>
@@ -840,14 +965,6 @@ ul {{ margin:8px 0 0 18px; }}
     path.write_text(html_doc)
 
 
-def show_json_pretty(path):
-    p = Path(path)
-    if not p.exists():
-        print("[]")
-        return
-    print(json.dumps(json.loads(p.read_text()), indent=2))
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--state-dir', required=True)
@@ -857,33 +974,40 @@ def main():
     ap.add_argument('--rpc-port')
     ap.add_argument('--deep-scan', default='1')
     ap.add_argument('--wave-window-seconds', type=int, default=1800)
+    ap.add_argument('--history-retention-days', type=int, default=30)
+    ap.add_argument('--rpc-timeout-seconds', type=int, default=30)
     args = ap.parse_args()
 
     state_dir = Path(args.state_dir)
     snapshots_dir = state_dir / 'snapshots'
     reports_dir = state_dir / 'reports'
+    health_path = state_dir / 'health.json'
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     history_path = state_dir / 'history.json'
-    history = load_json(history_path, {})
+    history, history_error = load_json(history_path, {}, salvage_corrupt=True)
+    history = ensure_history_placeholder(history, args.history_retention_days)
+    history = prune_history(history, args.history_retention_days)
 
     now = utc_now()
     timestamp = now.strftime('%Y%m%dT%H%M%SZ')
 
     try:
-        mn = run_cli(args.cli, 'masternodelist', 'json', conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port)
-        protx = run_cli(args.cli, 'protx', 'list', 'valid', '1', conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port)
+        mn = run_cli(args.cli, 'masternodelist', 'json', conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port, timeout_seconds=args.rpc_timeout_seconds)
+        protx = run_cli(args.cli, 'protx', 'list', 'valid', '1', conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port, timeout_seconds=args.rpc_timeout_seconds)
     except Exception as e:
         (reports_dir / 'latest-error.txt').write_text(str(e) + '\n')
+        write_health(health_path, 'error', error=str(e), timestamp=timestamp)
         raise
 
     rows = normalize_protx(protx, normalize_masternodelist(mn))
-    rows = deep_scan(rows, args.cli, args.deep_scan, conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port)
+    rows = deep_scan(rows, args.cli, args.deep_scan, conf=args.conf, datadir=args.datadir, rpcport=args.rpc_port, timeout_seconds=args.rpc_timeout_seconds)
 
     assessed = list(rows.values())
     by_owner, by_operator, by_ip, by_subnet = build_indexes(assessed)
     assessed = [assess_node(r, by_owner, by_operator, by_ip, by_subnet, history) for r in assessed]
+    history = prune_history(history, args.history_retention_days)
 
     assessed.sort(key=lambda x: (
         not x.get('is_problematic'),
@@ -909,7 +1033,11 @@ def main():
         'subnet_clusters': len(subnet_clusters),
         'pose_ban_waves': len(waves),
         'community_contacts': len(contact_list),
+        'history_retention_days': args.history_retention_days,
+        'rpc_timeout_seconds': args.rpc_timeout_seconds,
     }
+    if history_error:
+        summary['history_recovered'] = {'error': history_error[0], 'backup_path': history_error[1]}
 
     save_json(snapshots_dir / f'snapshot-{timestamp}.json', assessed)
     save_json(reports_dir / 'latest-summary.json', summary)
@@ -948,6 +1076,7 @@ def main():
     )
 
     save_json(history_path, history)
+    write_health(health_path, 'ok', timestamp=timestamp, summary=summary)
     print(json.dumps(summary))
 
 
@@ -966,11 +1095,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=${DEFCON_USER}
+Group=${DEFCON_USER}
 WorkingDirectory=${APP_DIR}
+EnvironmentFile=${ENV_FILE}
 ExecStart=${RUNNER_PATH}
 Restart=always
 RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=${STATE_DIR} ${LOG_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -1017,7 +1153,6 @@ show_suspect_clusters() {
   python3 - <<PY
 import json
 from pathlib import Path
-
 files = [
     ("Operator clusters", Path("${STATE_DIR}/reports/suspect-operator-clusters.json"), "operator_pubkey"),
     ("IP clusters", Path("${STATE_DIR}/reports/suspect-ip-clusters.json"), "service_ip"),
@@ -1090,13 +1225,16 @@ run_once() {
   mkdir -p "${STATE_DIR}/snapshots" "${STATE_DIR}/reports" "${LOG_DIR}"
   (
     flock -n 9 || { warn "Analyzer already running."; exit 1; }
-    sudo -u "${DEFCON_USER}" python3 "${APP_DIR}/analyzer.py" \
+    python3 "${APP_DIR}/analyzer.py" \
       --state-dir "${STATE_DIR}" \
       --cli "${CLI_BIN}" \
       --conf "${CONF_FILE}" \
+      --datadir "${DATA_DIR}" \
       --rpc-port "${DEFCON_RPC_PORT}" \
       --deep-scan "${DEEP_SCAN}" \
-      --wave-window-seconds "${WAVE_WINDOW_SECONDS}" | tee -a "${LOG_DIR}/manual-run.log"
+      --wave-window-seconds "${WAVE_WINDOW_SECONDS}" \
+      --history-retention-days "${HISTORY_RETENTION_DAYS}" \
+      --rpc-timeout-seconds "${RPC_TIMEOUT_SECONDS}" | tee -a "${LOG_DIR}/manual-run.log"
   ) 9>"${LOCK_FILE}"
 }
 
@@ -1106,6 +1244,7 @@ check_requirements() {
   [[ -x "${CLI_BIN}" ]] && ok "CLI found: ${CLI_BIN}" || err "CLI not found: ${CLI_BIN}"
   [[ -x "${DAEMON_BIN}" ]] && ok "Daemon found: ${DAEMON_BIN}" || err "Daemon not found: ${DAEMON_BIN}"
   [[ -f "${CONF_FILE}" ]] && ok "Config found: ${CONF_FILE}" || err "Config not found: ${CONF_FILE}"
+  [[ -d "${DATA_DIR}" ]] && ok "Datadir found: ${DATA_DIR}" || err "Datadir not found: ${DATA_DIR}"
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "${DEFCON_SERVICE}"; then
       ok "Service ${DEFCON_SERVICE} is running"
@@ -1114,7 +1253,7 @@ check_requirements() {
     fi
   fi
   if [[ -x "${CLI_BIN}" ]]; then
-    if sudo -u "${DEFCON_USER}" "${CLI_BIN}" \
+    if runuser -u "${DEFCON_USER}" -- "${CLI_BIN}" \
       -conf="${CONF_FILE}" \
       -datadir="${DATA_DIR}" \
       -rpcport="${DEFCON_RPC_PORT}" \
@@ -1147,7 +1286,7 @@ start_background() {
       return
     fi
 
-    nohup "${RUNNER_PATH}" >> "${NOHUP_LOG}" 2>&1 &
+    nohup runuser -u "${DEFCON_USER}" -- "${RUNNER_PATH}" >> "${NOHUP_LOG}" 2>&1 &
     echo $! > "${PID_FILE}"
     sleep 1
 
@@ -1162,7 +1301,6 @@ start_background() {
 
 stop_background() {
   source "${APP_DIR}/env.sh"
-
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "${APP_NAME}.service"; then
       systemctl stop "${APP_NAME}.service" || true
@@ -1253,6 +1391,9 @@ status_background() {
       echo "Uptime: ${uptimehuman}"
       echo "Tasks: ${task:-unknown}"
       echo "Memory: ${mem:-unknown}"
+      if [[ -f "${HEALTH_FILE}" ]]; then
+        echo "Health: $(tr -d '\n' < "${HEALTH_FILE}")"
+      fi
       echo
       echo "Recent log lines:"
       journalctl -u "${APP_NAME}.service" -n 12 --no-pager 2>/dev/null || true
@@ -1266,6 +1407,9 @@ status_background() {
       echo "SubState: ${substate:-unknown}"
       echo "is-active: ${active:-unknown}"
       echo "Enabled: ${enabled:-unknown}"
+      if [[ -f "${HEALTH_FILE}" ]]; then
+        echo "Health: $(tr -d '\n' < "${HEALTH_FILE}")"
+      fi
       echo
       echo "Last log lines:"
       journalctl -u "${APP_NAME}.service" -n 20 --no-pager 2>/dev/null || true
@@ -1307,6 +1451,7 @@ status_background() {
       echo "Started: ${started:-unknown}"
       echo "Uptime: ${uptimehuman}"
       echo "Log: ${NOHUP_LOG}"
+      [[ -f "${HEALTH_FILE}" ]] && echo "Health: $(tr -d '\n' < "${HEALTH_FILE}")"
       return
     fi
   fi
@@ -1320,12 +1465,14 @@ show_paths() {
 APP_DIR: ${APP_DIR}
 STATE_DIR: ${STATE_DIR}
 LOG_DIR: ${LOG_DIR}
+ENV_FILE: ${ENV_FILE}
 Reports: ${STATE_DIR}/reports
 HTML report: ${STATE_DIR}/reports/latest-report.html
 All nodes CSV: ${STATE_DIR}/reports/all-nodes.csv
 Problem nodes CSV: ${STATE_DIR}/reports/problem-nodes.csv
 Community contact CSV: ${STATE_DIR}/reports/community-contact-list.csv
 Snapshots: ${STATE_DIR}/snapshots
+Health: ${HEALTH_FILE}
 Logs: ${LOG_DIR}
 PATHS
 }
@@ -1337,7 +1484,7 @@ wipe_all_data() {
   read -rp "Type DELETE exactly to confirm: " confirm
   if [[ "$confirm" == "DELETE" ]]; then
     rm -rf "${STATE_DIR:?}/snapshots"/* "${STATE_DIR:?}/reports"/* "${LOG_DIR:?}"/*
-    rm -f "${STATE_DIR}/history.json" "${PID_FILE}" "${LOCK_FILE}"
+    rm -f "${STATE_DIR}/history.json" "${PID_FILE}" "${LOCK_FILE}" "${HEALTH_FILE}"
     ok "All stored data has been deleted."
   else
     warn "Cancelled."
@@ -1348,7 +1495,7 @@ menu() {
   while true; do
     echo
     echo -e "${BLUE}=====================================${NC}"
-    echo -e "${BLUE} DeFCoN Network Inspector v3${NC}"
+    echo -e "${BLUE} DeFCoN Network Inspector v2${NC}"
     echo -e "${BLUE}=====================================${NC}"
     echo "1) Check requirements"
     echo "2) Run one-time analysis"
@@ -1390,11 +1537,11 @@ install_app() {
   mkdir_p "${STATE_DIR}/snapshots"
   mkdir_p "${STATE_DIR}/reports"
   mkdir_p "${LOG_DIR}"
-  chown -R "${DEFCON_USER}:${DEFCON_USER}" "${STATE_DIR}" "${LOG_DIR}"
   write_env
   write_runner
   write_analyzer
   write_service
+  chown -R "${DEFCON_USER}:${DEFCON_USER}" "${STATE_DIR}" "${LOG_DIR}" "${APP_DIR}"
   ln -sf "$0" "${MENU_LINK}"
   chmod +x "$0"
   ok "Installation completed."
@@ -1403,16 +1550,16 @@ install_app() {
 usage() {
 cat <<USAGE
 Usage:
-  bash defcon-network-inspector.sh                # installs on first run and shows the menu
-  bash defcon-network-inspector.sh menu
-  bash defcon-network-inspector.sh install
-  bash defcon-network-inspector.sh run-once
-  bash defcon-network-inspector.sh start
-  bash defcon-network-inspector.sh stop
-  bash defcon-network-inspector.sh status
-  bash defcon-network-inspector.sh report
-  bash defcon-network-inspector.sh problems
-  bash defcon-network-inspector.sh wipe
+  bash defcon-network-inspector-v2.sh                # installs on first run and shows the menu
+  bash defcon-network-inspector-v2.sh menu
+  bash defcon-network-inspector-v2.sh install
+  bash defcon-network-inspector-v2.sh run-once
+  bash defcon-network-inspector-v2.sh start
+  bash defcon-network-inspector-v2.sh stop
+  bash defcon-network-inspector-v2.sh status
+  bash defcon-network-inspector-v2.sh report
+  bash defcon-network-inspector-v2.sh problems
+  bash defcon-network-inspector-v2.sh wipe
 USAGE
 }
 
