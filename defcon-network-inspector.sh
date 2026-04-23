@@ -1129,17 +1129,34 @@ check_requirements() {
 start_background() {
   source "${APP_DIR}/env.sh"
   mkdir -p "${LOG_DIR}" "${STATE_DIR}"
+
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now "${APP_NAME}.service"
-    ok "Background analysis started via systemd."
+    systemctl enable --now "${APP_NAME}.service" || true
+
+    if systemctl is-active --quiet "${APP_NAME}.service"; then
+      ok "Background analysis started via systemd."
+    else
+      warn "Start command was issued, but ${APP_NAME}.service is not active."
+      echo
+      echo "Recent log lines:"
+      journalctl -u "${APP_NAME}.service" -n 20 --no-pager 2>/dev/null || true
+    fi
   else
-    if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
-      warn "Background analysis is already running with PID $(cat "${PID_FILE}")"
+    if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}" 2>/dev/null)" 2>/dev/null; then
+      warn "Background analysis is already running with PID $(cat "${PID_FILE}")."
       return
     fi
+
     nohup "${RUNNER_PATH}" >> "${NOHUP_LOG}" 2>&1 &
     echo $! > "${PID_FILE}"
-    ok "Background analysis started via nohup. PID $(cat "${PID_FILE}")"
+    sleep 1
+
+    if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}" 2>/dev/null)" 2>/dev/null; then
+      ok "Background analysis started via nohup. PID $(cat "${PID_FILE}")."
+    else
+      warn "Start command was issued, but nohup background process is not running."
+      [[ -f "${NOHUP_LOG}" ]] && tail -n 20 "${NOHUP_LOG}" 2>/dev/null || true
+    fi
   fi
 }
 
