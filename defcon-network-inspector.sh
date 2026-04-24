@@ -1574,7 +1574,7 @@ ul {{
 }}
 
 li {{
-  margin:4px 0;
+  margin:5px 0;
 }}
 
 .statlist {{
